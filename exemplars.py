@@ -28,6 +28,6 @@ class ExemplarHandler(nn.Module, metaclass=abc.ABCMeta):
     def _is_on_cuda(self):
         return next(self.parameters()).is_cuda
 
-    @abc.abstractmethod
-    def feature_extractor(self, images):
-        pass
+    # @abc.abstractmethod
+    # def feature_extractor(self, images):
+    #     pass

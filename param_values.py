@@ -1,5 +1,5 @@
 #todo
-def set_default_values(args, also_hyper_params=True):
+def set_default_values(args, also_hyper_params=False):
     # -set default-values for certain arguments based on chosen scenario & experiment
     args.tasks = 10 if args.tasks is None else args.tasks
     args.iters = 100 if args.iters is None else args.iters

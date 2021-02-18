@@ -5,7 +5,7 @@ class Replayer(nn.Module, metaclass=abc.ABCMeta):
     '''Abstract module for a predictor/generator that can be trained with replay'''
 
     def __init__(self):
-        super(self).__init__()
+        super().__init__()
 
         # Optimizer (and whether it needs to be reset)
         self.optimizer = None

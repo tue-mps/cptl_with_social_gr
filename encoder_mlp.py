@@ -19,10 +19,9 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
             traj_lstm_input_size,
             traj_lstm_hidden_size,
             traj_lstm_output_size,
-            dropout=0,
+            dropout,
     ):
         super().__init__()
-        self.label = "predictor"
         self.obs_len = obs_len
         self.pred_len = pred_len
         self.traj_lstm_input_size = traj_lstm_input_size
@@ -35,7 +34,7 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
         self.traj_lstm_model = nn.LSTMCell(traj_lstm_input_size, traj_lstm_hidden_size)
 
         #-------Decoder------#
-        self.pred_lstm_model = nn.LSTMCell(traj_lstm_input_size, traj_lstm_output_size)
+        self.pred_lstm_model = nn.LSTMCell(traj_lstm_hidden_size, traj_lstm_output_size)
         self.pred_hidden2pos =nn.Linear(self.traj_lstm_output_size, 2)
 
     # initial encoder traj lstm hidden states
@@ -51,20 +50,15 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
             torch.randn(batch, self.traj_lstm_output_size).cuda(),
         )
 
-
-    # def is_on_cuda(self):
-    #     return next(self.parameters()).is_cuda
-
-    def forward(self, obs_traj_pos):
+    def forward(self, obs_traj_rel, obs_traj_pos, seq_start_end):
         batch = obs_traj_pos.shape[1] #todo define the batch
         traj_lstm_h_t, traj_lstm_c_t = self.init_encoder_traj_lstm(batch)
-        # pred_lstm_h_t, pred_lstm_c_t = self.init_decoder_traj_lstm(batch)
+        pred_lstm_h_t, pred_lstm_c_t = self.init_decoder_traj_lstm(batch)
         pred_traj_pos = []
         traj_lstm_hidden_states = []
         pred_lstm_hidden_states = []
 
         # encoder, calculate the hidden states
-
         for i, input_t in enumerate(
             obs_traj_pos[: self.obs_len].chunk(
                 obs_traj_pos[: self.obs_len].size(0), dim=0
@@ -75,20 +69,7 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
             )
             traj_lstm_hidden_states += [traj_lstm_h_t]
 
-
-        # for i, input_t in enumerate(
-        #     obs_traj_pos
-        # ):
-        #     traj_lstm_h_t, traj_lstm_c_t = self.traj_lstm_model(
-        #         input_t.squeeze(0), (traj_lstm_h_t, traj_lstm_c_t)
-        #     )
-        #     traj_lstm_hidden_states += [traj_lstm_h_t]
-
         output = obs_traj_pos[self.obs_len-1]
-        pred_lstm_h_t = traj_lstm_hidden_states[-1]
-        pred_lstm_c_t = torch.zeros_like(pred_lstm_h_t).cuda()
-
-
         if self.training:
             for i, input_t in enumerate(
                 obs_traj_pos[-self.pred_len :].chunk(
@@ -109,26 +90,6 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
                 output = self.pred_hidden2pos(pred_lstm_h_t)
                 pred_traj_pos += [output]
             outputs = torch.stack(pred_traj_pos)
-
-
-        # if self.training:
-        #     for i, input_t in enumerate(
-        #         future_traj_pos
-        #     ):
-        #         pred_lstm_h_t, pred_lstm_c_t = self.pred_lstm_model(
-        #             input_t.squeeze(0), (pred_lstm_h_t, pred_lstm_c_t)
-        #         )
-        #         output = self.pred_hidden2pos(pred_lstm_h_t)
-        #         pred_traj_pos += [output]
-        #     outputs = torch.stack(pred_traj_pos)
-        # else:
-        #     for i in range(self.pred_len):
-        #         pred_lstm_h_t, pred_lstm_c_t = self.pred_lstm_model(
-        #             output, (pred_lstm_h_t, pred_lstm_c_t)
-        #         )
-        #         output = self.pred_hidden2pos(pred_lstm_h_t)
-        #         pred_traj_pos += [output]
-        #     outputs = torch.stack(pred_traj_pos)
         return outputs
 
     def train_a_batch(self, x, y, x_=None, y_=None, active_classes=None, rnt=0.5):
@@ -184,7 +145,7 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
             # Run model
             y_hat = self(x)
 
-            # Calculate prediction loss  #todo ---> change loss for trajectory prediction
+            # Calculate prediction loss
             pred_traj = None if y is None else F.cross_entropy(input=y_hat, target=y, reduction='mean')
 
             # Weigh losses

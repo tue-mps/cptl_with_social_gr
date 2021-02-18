@@ -1,9 +1,11 @@
 from torch.utils.data import DataLoader
 from trajectories import TrajectoryDataset, seq_collate
 
-def data_loader(args,path):
+def data_loader(args, path, data_name, data_type):
     dset = TrajectoryDataset(
         path,
+        data_name,
+        data_type,
         obs_len=args.obs_len,
         pred_len=args.pred_len,
         skip=args.skip,

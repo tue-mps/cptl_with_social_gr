@@ -44,7 +44,7 @@ def seq_collate(data):
         seq_start_end,
     ]
 
-    return tuple(out)
+    return tuple(out)     # tuple(out)
 
 
 def read_file(_path, delim="\t"):
@@ -86,13 +86,15 @@ class TrajectoryDataset(Dataset):
     def __init__(
         self,
         data_dir,
+        data_name,
+        data_type,
         obs_len=8,
         pred_len=12,
         skip=1,
         threshold=0.002,
         min_ped=1,
-        delim=","
-        # delim="\t",
+        # delim=","
+        delim="\t",
     ):
         """
         Args:
@@ -109,69 +111,74 @@ class TrajectoryDataset(Dataset):
         super(TrajectoryDataset, self).__init__()
 
         self.data_dir = data_dir
+        self.data_name = data_name
+        self.data_type = data_type
         self.obs_len = obs_len
         self.pred_len = pred_len
         self.skip = skip
         self.seq_len = self.obs_len + self.pred_len
         self.delim = delim
 
-        all_files = os.listdir(self.data_dir)
-        all_files = [os.path.join(self.data_dir, _path) for _path in all_files]
+        # all_files = os.listdir(self.data_dir)
+        # all_files = [os.path.join(self.data_dir, _path) for _path in all_files]
         num_peds_in_seq = []
         seq_list = []
         seq_list_rel = []
         loss_mask_list = []
         non_linear_ped = []
-        for path in all_files:
-            data = read_file(path, delim)
-            frames = np.unique(data[:, 0]).tolist()
-            frame_data = []
-            for frame in frames:
-                frame_data.append(data[frame == data[:, 0], :])
-            num_sequences = int(math.ceil((len(frames) - self.seq_len + 1) / skip))
+        # for path in all_files:
+        # path = self.data_dir + '/' + self.data_name + '_train.txt'
+        # path = self.data_dir + '/' + self.data_name
+        path = os.path.join(self.data_dir, self.data_name + self.data_type)
+        data = read_file(path, delim)
+        frames = np.unique(data[:, 0]).tolist()
+        frame_data = []
+        for frame in frames:
+            frame_data.append(data[frame == data[:, 0], :])
+        num_sequences = int(math.ceil((len(frames) - self.seq_len + 1) / skip))
 
-            for idx in range(0, num_sequences * self.skip + 1, skip):
-                # curr_seq_data is a 20 length sequence
-                curr_seq_data = np.concatenate(
-                    frame_data[idx : idx + self.seq_len], axis=0
-                )
-                peds_in_curr_seq = np.unique(curr_seq_data[:, 1])
-                curr_seq_rel = np.zeros((len(peds_in_curr_seq), 2, self.seq_len))
-                curr_seq = np.zeros((len(peds_in_curr_seq), 2, self.seq_len))
-                # curr_seq_rel = np.zeros((len(peds_in_curr_seq), 2, self.seq_len))
-                # curr_seq = np.zeros((len(peds_in_curr_seq), 2, self.seq_len))
-                curr_loss_mask = np.zeros((len(peds_in_curr_seq), self.seq_len))
-                num_peds_considered = 0
-                _non_linear_ped = []
+        for idx in range(0, num_sequences * self.skip + 1, skip):
+            # curr_seq_data is a 20 length sequence
+            curr_seq_data = np.concatenate(
+                frame_data[idx : idx + self.seq_len], axis=0
+            )
+            peds_in_curr_seq = np.unique(curr_seq_data[:, 1])
+            curr_seq_rel = np.zeros((len(peds_in_curr_seq), 2, self.seq_len))
+            curr_seq = np.zeros((len(peds_in_curr_seq), 2, self.seq_len))
+            # curr_seq_rel = np.zeros((len(peds_in_curr_seq), 2, self.seq_len))
+            # curr_seq = np.zeros((len(peds_in_curr_seq), 2, self.seq_len))
+            curr_loss_mask = np.zeros((len(peds_in_curr_seq), self.seq_len))
+            num_peds_considered = 0
+            _non_linear_ped = []
 
-                for _, ped_id in enumerate(peds_in_curr_seq):
-                    curr_ped_seq = curr_seq_data[curr_seq_data[:, 1] == ped_id, :]
-                    curr_ped_seq = np.around(curr_ped_seq, decimals=4)
-                    pad_front = frames.index(curr_ped_seq[0, 0]) - idx
-                    pad_end = frames.index(curr_ped_seq[-1, 0]) - idx + 1
+            for _, ped_id in enumerate(peds_in_curr_seq):
+                curr_ped_seq = curr_seq_data[curr_seq_data[:, 1] == ped_id, :]
+                curr_ped_seq = np.around(curr_ped_seq, decimals=4)
+                pad_front = frames.index(curr_ped_seq[0, 0]) - idx
+                pad_end = frames.index(curr_ped_seq[-1, 0]) - idx + 1
 
-                    if pad_end - pad_front != self.seq_len:
-                        continue
-                    curr_ped_seq = np.transpose(curr_ped_seq[:, 2:])
-                    # curr_ped_seq = np.transpose((1,0,2))
-                    curr_ped_seq = curr_ped_seq
-                    # Make coordinates relative
-                    rel_curr_ped_seq = np.zeros(curr_ped_seq.shape)
-                    rel_curr_ped_seq[:, 1:] = curr_ped_seq[:, 1:] - curr_ped_seq[:, :-1]
-                    _idx = num_peds_considered
-                    curr_seq[_idx, :, pad_front:pad_end] = curr_ped_seq
-                    curr_seq_rel[_idx, :, pad_front:pad_end] = rel_curr_ped_seq
-                    # Linear vs Non-Linear Trajectory
-                    #_non_linear_ped.append(poly_fit(curr_ped_seq, pred_len, threshold))
-                    curr_loss_mask[_idx, pad_front:pad_end] = 1
-                    num_peds_considered += 1
+                if pad_end - pad_front != self.seq_len:
+                    continue
+                curr_ped_seq = np.transpose(curr_ped_seq[:, 2:])
+                # curr_ped_seq = np.transpose((1,0,2))
+                curr_ped_seq = curr_ped_seq
+                # Make coordinates relative
+                rel_curr_ped_seq = np.zeros(curr_ped_seq.shape)
+                rel_curr_ped_seq[:, 1:] = curr_ped_seq[:, 1:] - curr_ped_seq[:, :-1]
+                _idx = num_peds_considered
+                curr_seq[_idx, :, pad_front:pad_end] = curr_ped_seq
+                curr_seq_rel[_idx, :, pad_front:pad_end] = rel_curr_ped_seq
+                # Linear vs Non-Linear Trajectory
+                #_non_linear_ped.append(poly_fit(curr_ped_seq, pred_len, threshold))
+                curr_loss_mask[_idx, pad_front:pad_end] = 1
+                num_peds_considered += 1
 
-                if num_peds_considered > min_ped:
-                    #non_linear_ped += _non_linear_ped
-                    num_peds_in_seq.append(num_peds_considered)
-                    loss_mask_list.append(curr_loss_mask[:num_peds_considered])
-                    seq_list.append(curr_seq[:num_peds_considered])
-                    seq_list_rel.append(curr_seq_rel[:num_peds_considered])
+            if num_peds_considered > min_ped:
+                #non_linear_ped += _non_linear_ped
+                num_peds_in_seq.append(num_peds_considered)
+                loss_mask_list.append(curr_loss_mask[:num_peds_considered])
+                seq_list.append(curr_seq[:num_peds_considered])
+                seq_list_rel.append(curr_seq_rel[:num_peds_considered])
 
         self.num_seq = len(seq_list)
         seq_list = np.concatenate(seq_list, axis=0)

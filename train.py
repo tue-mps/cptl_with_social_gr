@@ -25,7 +25,7 @@ def train_cl(model, train_datasets, replay_model="none", scenario="class", class
     model.train()
 
     # Use cuda?
-    cuda = model.is_on_cuda()
+    cuda = model._is_on_cuda()
     device = model._device()
 
     # Initiate possible sources for replay (no replay for 1st task)
@@ -33,8 +33,8 @@ def train_cl(model, train_datasets, replay_model="none", scenario="class", class
     previous_model = None
 
     # Loop over all tasks.
-    for task, train_datasets in enumerate(train_datasets, 1):
-        training_dataset = train_datasets
+    for task, train_dataset in enumerate(train_datasets, 1):
+        training_dataset = train_dataset
 
         # Find [active_classes]
         active_classes = None   # -> for Domain-IL scenario, always all classes are active
@@ -57,7 +57,9 @@ def train_cl(model, train_datasets, replay_model="none", scenario="class", class
             # Update # iters left on current data-loader(s) and, if need, create new one(s)
             iters_left -= 1
             if iters_left==0:
-                data_loader = iter(utils.get_data_loader())
+                # data_loader = iter(utils.get_data_loader())
+                data_loader = iter(train_dataset)
+
                 #NOTE: [train_dataset] is training-set of current task
                 #      [training_dataset] is training-set of current task with stored exemplars added (if requested)
                 iters_left = len(data_loader)
@@ -66,9 +68,10 @@ def train_cl(model, train_datasets, replay_model="none", scenario="class", class
             #-------------Collect data----------------#
 
             ##------CURRENT BATCH-------##
-            x, y = next(data_loader)                                     # --> sample training data of current task
-            y = y - class_per_task*(task-1) if scenario="task" else y    # --> ITL: adjust y-targets
-            x, y = x.to(device), y.to(device)                            # --> transfer them to correct device
+            out = next(data_loader)                                     # --> sample training data of current task
+            # y = y - class_per_task*(task-1) if scenario="task" else y    # --> ITL: adjust y-targets
+            print('\nout', len(out))
+            x, y = out[0].to(device), out[1].to(device)                            # --> transfer them to correct device
             binary_distillation = hasattr(model, "binaryCE") and model.binaryCE and model.binaryCE_distill
             if binary_distillation and scenario=="class" and (previous_model is not None):
                 with torch.no_grad():
@@ -92,7 +95,7 @@ def train_cl(model, train_datasets, replay_model="none", scenario="class", class
             if batch_index <= iters:
 
                 # Train the main model with this batch
-                loss_dict = model.train_a_batch()
+                loss_dict = model.train_a_batch(x, y, x_=x_, y_=y_, rnt=1./task)
 
                 # Fire callbacks (for visualization of training-progress / evaluating performance after each task)
                 for loss_cb in loss_cbs:
@@ -110,7 +113,7 @@ def train_cl(model, train_datasets, replay_model="none", scenario="class", class
             if generator is not None and batch_index <= gen_iters:
 
                 # Train the generator with this batch
-                loss_dict = generator.train_a_batch()
+                loss_dict = generator.train_a_batch(x, y, x_=x_, y_=y_, rnt=1./task)
 
                 # Fire callbacks on each iteration
                 for loss_cb in gen_loss_cbs:

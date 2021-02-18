@@ -29,6 +29,7 @@ parser.add_argument('--pred_len', default=8, type=int, help="the predicted frame
 parser.add_argument('--skip', default=1, type=int)
 parser.add_argument('--delim', default='\t')
 parser.add_argument('--batch_size', default=64, type=int)
+parser.add_argument('--loader_num_workers', default=8, type=int)
 
 # experimental task parameters
 task_params = parser.add_argument_group('Task Parameters')
@@ -41,13 +42,21 @@ loss_params.add_argument('--bce_distill', action='store_true', help="distilled l
 
 # model architecture parameters, about LSTM #todo
 model_params = parser.add_argument_group('Model Parameters')
-model_params.add_argument('')
+model_params.add_argument('--fc-layers', type=int, default=3, dest='fc_lay', help="# of fully-connected layers")
+model_params.add_argument('--fc-units', type=int, metavar="N", help="# of units in first fc-layers")
+model_params.add_argument('--fc-drop', type=float, default=0., help="dropout probability for fc-units")
+model_params.add_argument('--fc-bn', type=str, default="no", help="use batch-norm in the fc-layers (no|yes)")
+model_params.add_argument('--fc-nl', type=str, default="relu", choices=["relu", "leakyrelu"])
+model_params.add_argument('--traj_lstm_input_size', default=2, type=int)
+model_params.add_argument('--traj_lstm_hidden_size', default=32, type=int)
+model_params.add_argument('--traj_lstm_output_size', default=32, type=int)
+
 
 # training hyperparameters / initialization
 train_params = parser.add_argument_group('Training Parameters')
 train_params.add_argument('--iters', type=int, help="batches to optimize solver")
 train_params.add_argument('--lr', type=float, help="learning rate")
-train_params.add_argument('--batch', type=int, default=128, help="batch-size") #todo reference batch_size
+train_params.add_argument('--batch', type=int, default=64, help="batch-size") #todo reference batch_size
 train_params.add_argument('--optimizer', type=str, choices=['adam', 'adam_reset', 'sgd'], default='adam')
 
 # "memory replay" parameters
@@ -55,7 +64,7 @@ replay_params = parser.add_argument_group('Replay Parameters')
 replay_params.add_argument('--feedback', action='store_true', help="equip model with feedback connections")
 replay_params.add_argument('--z-dim', type=int, default=100, help="size of latent representation")
 replay_choices = ['offline', 'exact', 'generative', 'none', 'current', 'exemplars']
-replay_params.add_argument('--replay', type=str, default='none', choices=replay_choices)
+replay_params.add_argument('--replay', type=str, default='generative', choices=replay_choices)
 replay_params.add_argument('--distill', action='store_true', help='use distillation for replay')
 replay_params.add_argument('--temp', type=float, default=2., dest='temp', help="temperature for distillation")
 replay_params.add_argument('--agem', action='store_true', help="use gradient of replay as inequality constraint")
@@ -70,6 +79,10 @@ genmodel_params.add_argument('--g-fc-uni', type=int, help="[fc_units] in generat
 gen_params = parser.add_argument_group('Generator Hyper Parameters')
 gen_params.add_argument('--g-iters', type=int, help="batches to train generator (default: same as lstm)")
 gen_params.add_argument('--lr-gen', type=float, help="learning rate generator (default: same as lr)")
+
+# data storage ('exemplars') parameters
+store_params = parser.add_argument_group('Data Storage Parameters')
+store_params.add_argument('--use-exemplars', action='store_true', help="use exemplars for classification")
 
 # evaluation parameters
 eval_params = parser.add_argument_group('Evaluation Parameters')
@@ -129,13 +142,26 @@ def run(args, verbose=False):
     # todo
     # train_datasets = None
     # test_datasets = None
-    train_path = utils.get_dset_path(args.dataset_name, "train")
-    val_path = utils.get_dset_path(args.dataset_name, "val")
-
+    train_order = ['uni_examples','students003','students001','crowds_zara03','biwi_hotel','crowds_zara02','crowds_zara01']
+    train_datasets = []
+    val_datasets = []
     print("\nInitializing train dataset")
-    train_dset, train_loader = data_loader(args, train_path)
     print("\nInitializing val dataset")
-    _, val_loader = data_loader(args, val_path)
+
+    for i, dataset_name in enumerate(train_order):
+        # load train/val dataset path
+        train_path = utils.get_dset_path("train")
+        val_path = utils.get_dset_path("val")
+        # load train dataset
+        data_type = "_train.txt"
+        train_dset, train_loader = data_loader(args, train_path, dataset_name, data_type)
+        # load val dataset
+        data_type = "_val.txt"
+        _, val_loader = data_loader(args, val_path, dataset_name, data_type)
+        train_datasets.append(train_loader)
+        val_datasets.append(val_loader)
+    # return (train_datasets, val_datasets)
+
 
 
 
@@ -147,16 +173,20 @@ def run(args, verbose=False):
 
     # Define main model (i.e., lstm, if requested with feedback connections) #todo
     if args.feedback:
-        model = AutoEncoder().to(device)
+        model = AutoEncoder(obs_len=args.obs_len, pred_len=args.pred_len, traj_lstm_input_size=args.traj_lstm_input_size,
+                            traj_lstm_hidden_size=args.traj_lstm_hidden_size, traj_lstm_output_size=args.traj_lstm_output_size,
+                            z_dim=args.z_dim).to(device)
         model.lamda_pl = 1.
     else:
-        model = Predictor().to(device)
+        model = Predictor(obs_len=args.obs_len, pred_len=args.pred_len, traj_lstm_input_size=args.traj_lstm_input_size,
+                          traj_lstm_hidden_size=args.traj_lstm_hidden_size, traj_lstm_output_size=args.traj_lstm_output_size).to(device)
 
     # Define optimizer (only include parameters that "requires_grad")
-    model.optim_list = [{'params': filter(lambda p: p.required_grad, model.parameters()), 'lr': args.lr}]
+    # model.optim_list = [{'params': filter(lambda p: p.required_grad, model.parameters()), 'lr': args.lr}]
     model.optim_type = args.optimizer
     if model.optim_type in ("adam", "adam_reset"):
-        model.optimizer = optim.Adam(model.optim_list, betas=(0.9, 0.999))
+        # model.optimizer = optim.Adam(model.optim_list, betas=(0.9, 0.999))
+        model.optimizer = optim.Adam(model.parameters(), betas=(0.9, 0.999))
     elif model.optim_type == "sgd":
         model.optimizer = optim.SGD(model.optim_list)
     else:
@@ -178,12 +208,15 @@ def run(args, verbose=False):
     train_gen = True if (args.replay=="generative" and not args.feedback) else False
     if train_gen:
         # -specify architecture
-        generator = AutoEncoder().to(device)
+        generator = AutoEncoder(obs_len=args.obs_len, pred_len=args.pred_len, traj_lstm_input_size=args.traj_lstm_input_size,
+                                traj_lstm_hidden_size=args.traj_lstm_hidden_size, traj_lstm_output_size=args.traj_lstm_output_size,
+                                z_dim=args.z_dim).to(device)
         # -set optimizer(s)
-        generator.optim_list = [{'params': filter(lambda p: p.required_grad, generator.parameters()), 'lr': args.lr_gen}]
+        # generator.optim_list = [{'params': filter(lambda p: p.required_grad, generator.parameters()), 'lr': args.lr_gen}]
         generator.optim_type = args.optimizer
         if generator.optim_type in ("adam", "adam_reset"):
-            generator.optimizer = optim.Adam(generator.optim_list, betas=(0.9, 0.999))
+            # generator.optimizer = optim.Adam(generator.optim_list, betas=(0.9, 0.999))
+            generator.optimizer = optim.Adam(generator.parameters(), betas=(0.9, 0.999))
         elif generator.optim_type == "sgd":
             generator.optimizer = optim.SGD(generator.optim_list)
     else:
@@ -252,7 +285,10 @@ def run(args, verbose=False):
     # Keep track of training-time
     start = time.time()
     # Train model
-    train_cl()
+    train_cl(model, train_datasets, replay_model=args.replay, iters=args.iters, batch_size=args.batch,
+             generator=generator, gen_iters=args.g_iters, gen_loss_cbs=generator_loss_cbs,
+             sample_cbs=sample_cbs, eval_cbs=eval_cbs, loss_cbs=generator_loss_cbs if args.feedback else solver_loss_cbs,
+             metric_cbs=metric_cbs)
     # Get total training-time in seconds, and write to file
     if args.time:
         training_time = time.time() - start

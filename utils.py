@@ -13,6 +13,6 @@ def get_data_loader():
     pass
 
 # Get dataset path
-def get_dset_path(dset_name, dset_type):
+def get_dset_path(dset_type):
     _dir = os.path.dirname(__file__)
-    return os.path.join(_dir, "datasets", dset_name, dset_type)
+    return os.path.join(_dir, "datasets", dset_type)
