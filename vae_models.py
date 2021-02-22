@@ -4,6 +4,8 @@ from torch.nn import functional as F
 import torch.nn as nn
 from linear_nets import MLP,fc_layer,fc_layer_split
 
+from utils import l2_loss
+
 class AutoEncoder(Replayer):
     '''Class for variational auto-encoder (VAE) models.'''
 
@@ -32,7 +34,7 @@ class AutoEncoder(Replayer):
         self.lamda_vl = 1.
         self.lamda_pl = 0.
 
-        self.average = True # --> makes that [reconL] and [variatL] are both divided by number of iput-pixels
+        self.average = "average" # --> makes that [reconL] and [variatL] are both divided by number of iput-pixels
 
 
 
@@ -57,9 +59,14 @@ class AutoEncoder(Replayer):
         self.fcD = fc_layer(traj_lstm_hidden_size*2, traj_lstm_hidden_size, batch_norm=None)
 
         # -hidden state
-        self.pred_lstm_model = nn.LSTMCell(traj_lstm_hidden_size, traj_lstm_output_size)
+        self.pred_lstm_model = nn.LSTMCell(traj_lstm_input_size, traj_lstm_output_size)
         # -to traj
         self.pred_hidden2pos = nn.Linear(self.traj_lstm_output_size, 2)
+
+
+    @property
+    def name(self):
+        return "{}".format("Generator --> VAE")
 
 
     ##---- FORWARD FUNCTIONS ----##
@@ -92,25 +99,37 @@ class AutoEncoder(Replayer):
         eps = std.new(std.size()).normal_()
         return eps.mul(std).add_(mu)
 
-    def decode(self, z, obs_traj_pos):
+    def decode(self, z, size=None, obs_traj_pos=None, x=None, x_=None):
         hD = self.fromZ(z)
         hidden_features = self.fcD(hD)
         pred_lstm_h_t = hidden_features
         pred_lstm_c_t = torch.zeros_like(pred_lstm_h_t).cuda()
         pred_traj_pos = []
 
-        for i, input_t in enumerate(
-                obs_traj_pos[: self.obs_len].chunk(
-                    obs_traj_pos[: self.obs_len].size(0), dim=0
+        if x is not None:
+            for i, input_t in enumerate(
+                    obs_traj_pos[: self.obs_len].chunk(
+                        obs_traj_pos[: self.obs_len].size(0), dim=0
+                    )
+            ):
+                pred_lstm_h_t, pred_lstm_c_t = self.pred_lstm_model(
+                    input_t.squeeze(0), (pred_lstm_h_t, pred_lstm_c_t)      # todo whether use teach force, input_t --> output
                 )
-        ):
-            pred_lstm_h_t, pred_lstm_c_t = self.pred_lstm_model(
-                input_t.squeeze(0), (pred_lstm_h_t, pred_lstm_c_t)
-            )
-            output = self.pred_hidden2pos(pred_lstm_h_t)
-            pred_traj_pos += [output]
-        outputs = torch.stack(pred_traj_pos)
-        return outputs
+                a = input_t.squeeze(0)
+                output = self.pred_hidden2pos(pred_lstm_h_t)
+                pred_traj_pos += [output]
+            outputs = torch.stack(pred_traj_pos)
+            return outputs
+        elif x_ is not None:
+            output = 10 * torch.rand(size,2).cuda()
+            for i in range(self.obs_len):
+                pred_lstm_h_t, pred_lstm_c_t = self.pred_lstm_model(
+                    output, (pred_lstm_h_t, pred_lstm_c_t)
+                )
+                output = self.pred_hidden2pos(pred_lstm_h_t)
+                pred_traj_pos += [output]
+            outputs = torch.stack(pred_traj_pos)
+            return outputs
 
     # Pass latent variable activations through feedback connections, to generator reconstructed image
     # def decode(self, z):
@@ -150,13 +169,13 @@ class AutoEncoder(Replayer):
 
         # complete_input = torch.cat(
         #     (traj_lstm_hidden_states[-1], traj_lstm_hidden_states_2[-1]), dim=0
-        # )    # todo dim need to consider
+        # )    #
         
         # encode (forward), reparameterize and decode (backward)
         vae_input = traj_lstm_hidden_states[-1]
         mu, logvar, hE = self.encode(vae_input)
         z = self.reparameterize(mu, logvar)
-        traj_recon = self.decode(z, obs_traj_pos)
+        traj_recon = self.decode(z, obs_traj_pos=obs_traj_pos, x=True)
         return (traj_recon, mu, logvar, z)
 
 
@@ -175,7 +194,7 @@ class AutoEncoder(Replayer):
 
         # decode z into traj x
         with torch.no_grad():
-            traj = self.decode(z)
+            traj = self.decode(z, size=size, x_=True)
 
         # set model back to its initial mode
         self.train(mode=mode)
@@ -185,7 +204,7 @@ class AutoEncoder(Replayer):
 
     ##-------- LOSS FUNCTIONS --------##
 
-    def calculate_recon_loss(self, x, x_recon, average=False):
+    def calculate_recon_loss(self, x, x_recon, mode=False):
         '''Calculate reconstruction loss for each element in the batch.
 
         INPUT:  - [x]         <tensor> with original input (1st dimension (ie, dim=0) is "batch-dimension")
@@ -194,13 +213,22 @@ class AutoEncoder(Replayer):
 
         OUTPUT: - [reconL]    <1D-tensor> of length [batch_size]
         '''
+        # x = x.permute(1,0,2)
+        # x_recon = x_recon.permute(1,0,2)
+        # batch_size = x.size(0)
+        seq_len, batch, size = x.size()
+        # reconL = F.binary_cross_entropy(input=x_recon.reshape(batch_size, -1), target=x.reshape(batch_size, -1),
+        #                                 reduction='none')
+        # reconL = torch.mean(reconL, dim=1) if mode else torch.sum(reconL, dim=1)
 
-        batch_size = x.size(0)
-        reconL = F.binary_cross_entropy(input=x_recon.view(batch_size, -1), target=x.view(batch_size, -1),
-                                        reduction='none')
-        reconL = torch.mean(reconL, dim=1) if average else torch.sum(reconL, dim=1)
+        reconL = (x.permute(1,0,2) - x_recon.permute(1,0,2)) ** 2
+        if mode == "sum":
+            return torch.sum(reconL)
+        elif mode == "average":
+            return torch.sum(reconL) / (batch*seq_len*size)
+        elif mode == "raw":
+            return reconL.sum(dim=2).sum(dim=1)
 
-        return reconL
 
     def calculate_variat_loss(self, mu, logvar):
         '''Calculate reconstruction loss for each element in the batch.
@@ -237,7 +265,7 @@ class AutoEncoder(Replayer):
         '''
 
         ###---Reconstruction loss---###
-        reconL = self.calculate_recon_loss(x=x, x_recon=recon_x, average=self.average)  # -> possibly average over traj
+        reconL = self.calculate_recon_loss(x=x, x_recon=recon_x, mode=self.average)  # -> possibly average over traj
         reconL = torch.mean(reconL)                                                     # -> average over batch
 
         ###--- Variational loss ----###
@@ -247,16 +275,17 @@ class AutoEncoder(Replayer):
             if self.average:
                 pass         # todo
         else:
-            variatL = torch.tensor(0, device=self._device())
+            variatL = torch.tensor(0., device=self._device())
 
+        '''
         ###----Prediction loss----###
         if y_target is not None:
             predL = F.cross_entropy(y_hat, y_target, reduction='mean')  #-> average over batch
         else:
-            predL = torch.tensor(0, device=self._device())
-
+            predL = torch.tensor(0., device=self._device())
+        '''
         # Return a tuple of the calculated losses
-        return reconL, variatL, predL
+        return reconL, variatL
 
     ##------- TRAINING FUNCTIONS -------##
 
@@ -282,15 +311,16 @@ class AutoEncoder(Replayer):
 
             # If needed (e.g., Task-IL or Class-IL scenario), remove predictions for classes not in current task
             # if active_classes is not None:
-            #     pass              #todo
+            #     pass              #
 
             # Calculate all losses
-            reconL, variatL, predL, _ = self.loss_function(recon_x=recon_batch, x=x, y_hat=None, y_target=None, mu=mu, logvar=logvar)
+            reconL, variatL = self.loss_function(recon_x=recon_batch, x=x, y_hat=None, y_target=None, mu=mu, logvar=logvar)
 
             # Weigh losses as requested
-            loss_cur = self.lamda_rcl*reconL + self.lamda_vl*variatL + self.lamda_pl*predL
+            # loss_cur = self.lamda_rcl*reconL + self.lamda_vl*variatL + self.lamda_pl*predL
+            loss_cur = self.lamda_rcl*reconL + self.lamda_vl*variatL
 
-            # Calculate training-precision  #todo need y_hat
+            # Calculate training-precision  #
 
 
         ##--(2)-- REPLAYED DATA --##
@@ -317,17 +347,18 @@ class AutoEncoder(Replayer):
                     recon_batch, mu, logvar, z = self(x_temp_)
 
                 # Calculate all losses
-                reconL_r[replay_id], variatL_r[replay_id], predL_r[replay_id] = self.loss_function(
+                reconL_r[replay_id], variatL_r[replay_id] = self.loss_function(
                     recon_x=recon_batch, x=x_temp_, mu=mu, logvar=logvar
                 )
 
                 # Weigh losses as requested
                 loss_replay[replay_id] = self.lamda_rcl*reconL_r[replay_id] + self.lamda_vl*variatL_r[replay_id]
+                '''
                 if self.replay_target=="hard":
                     loss_replay[replay_id] += self.lamda_pl*predL_r[replay_id]
                 elif self.replay_target=="soft":
                     loss_replay[replay_id] += self.lamda_pl*predL_r[replay_id]
-
+                '''
 
         # Calculate total loss
         loss_replay = None if (x_ is None) else sum(loss_replay)/n_replays
@@ -347,8 +378,8 @@ class AutoEncoder(Replayer):
             'loss_total': loss_total.item(),
             'reconL': reconL.item() if x is not None else 0,
             'variatL': variatL.item() if x is not None else 0,
-            'predL': predL.item() if x is not None else 0,
+            # 'predL': predL.item() if x is not None else 0,
             'reconL_r': sum(reconL_r).item()/n_replays if x_ is not None else 0,
             'variatL_r': sum(variatL_r).item()/n_replays if x_ is not None else 0,
-            'predL_r': sum(predL_r).item()/n_replays if x_ is not None else 0,
+            # 'predL_r': sum(predL_r).item()/n_replays if x_ is not None else 0,
         }

@@ -1,4 +1,4 @@
-#todo
+#
 def set_default_values(args, also_hyper_params=False):
     # -set default-values for certain arguments based on chosen scenario & experiment
     args.tasks = 10 if args.tasks is None else args.tasks

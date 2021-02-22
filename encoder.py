@@ -7,6 +7,8 @@ from exemplars import ExemplarHandler
 from replayer import Replayer
 from continual_learner import ContinualLearner
 
+from utils import l2_loss
+
 
 class Predictor(ContinualLearner, Replayer, ExemplarHandler):
     '''Model for predicting trajectory, "enriched" as "ContinualLearner"-, Replayer- and ExemplarHandler-object.'''
@@ -55,6 +57,10 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
     # def is_on_cuda(self):
     #     return next(self.parameters()).is_cuda
 
+    @property
+    def name(self):
+        return "{}".format("Predictor --> LSTM")
+
     def forward(self, obs_traj_pos):
         batch = obs_traj_pos.shape[1] #todo define the batch
         traj_lstm_h_t, traj_lstm_c_t = self.init_encoder_traj_lstm(batch)
@@ -88,7 +94,16 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
         pred_lstm_h_t = traj_lstm_hidden_states[-1]
         pred_lstm_c_t = torch.zeros_like(pred_lstm_h_t).cuda()
 
+        for i in range(self.pred_len):
+            pred_lstm_h_t, pred_lstm_c_t = self.pred_lstm_model(
+                output, (pred_lstm_h_t, pred_lstm_c_t)
+            )
+            output = self.pred_hidden2pos(pred_lstm_h_t)
+            pred_traj_pos += [output]
+        outputs = torch.stack(pred_traj_pos)
 
+
+        '''
         if self.training:
             for i, input_t in enumerate(
                 obs_traj_pos[-self.pred_len :].chunk(
@@ -109,6 +124,7 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
                 output = self.pred_hidden2pos(pred_lstm_h_t)
                 pred_traj_pos += [output]
             outputs = torch.stack(pred_traj_pos)
+        '''
 
 
         # if self.training:
@@ -131,14 +147,14 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
         #     outputs = torch.stack(pred_traj_pos)
         return outputs
 
-    def train_a_batch(self, x, y, x_=None, y_=None, active_classes=None, rnt=0.5):
+    def train_a_batch(self, x, y, x_=None, y_=None, loss_mask=None, active_classes=None, rnt=0.5):
         '''
         Train model for one batch ([x],[y]), possibly supplemented with replayed data ([x_], [y_]).
 
-        [x]       <tensor> batch of inputs (could be None, in which case only 'replayed' data is used)
-        [y]       <tensor> batch of corresponding prediction trajectory
-        [x_]      None or (<list> of) <tensor> batch of replayed inputs
-        [y_]      None or (<list> of) <tensor> batch of corresponding "replayed"  prediction trajectory
+        [x]       <tensor> batch of past trajectory (could be None, in which case only 'replayed' data is used)
+        [y]       <tensor> batch of corresponding future trajectory
+        [x_]      None or (<list> of) <tensor> batch of replayed past trajectory
+        [y_]      None or (<list> of) <tensor> batch of corresponding "replayed"  future trajectory
 
         '''
 
@@ -148,7 +164,7 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
         # Reset optimizer
         self.optimizer.zero_grad()
 
-        #--(1)-- REPLAYED DTA---#
+        #--(1)-- REPLAYED DATA---#
 
         if x_ is not None:
             y_ = [y_]
@@ -169,7 +185,8 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
 
                 # Calculate losses
                 if (y_ is not None) and (y_[replay_id] is not None):
-                    pred_traj_r[replay_id] = F.cross_entropy(y_hat, y_[replay_id], reduction='mean')
+                    # pred_traj_r[replay_id] = F.cross_entropy(y_hat.permute(1,0,2), y_[replay_id].permute(1,0,2), reduction='mean')
+                    pred_traj_r[replay_id] = l2_loss(y_hat, y_[replay_id], mode="average")
 
                 # Weigh losses
                 loss_replay[replay_id] = pred_traj_r[replay_id]
@@ -184,15 +201,20 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
             # Run model
             y_hat = self(x)
 
-            # Calculate prediction loss  #todo ---> change loss for trajectory prediction
-            pred_traj = None if y is None else F.cross_entropy(input=y_hat, target=y, reduction='mean')
+            # Calculate prediction loss
+            # pred_traj = None if y is None else F.cross_entropy(input=y_hat.permute(1,0,2), target=y.permute(1,0,2), reduction='mean')
+            pred_traj = None if y is None else l2_loss(y_hat, y, mode="average")
+            # a = torch.numel(loss_mask.data)
 
             # Weigh losses
             loss_cur = pred_traj
 
 
         # Combine loss from current and replayed batch
-        loss_total = loss_replay if (x is None) else rnt*loss_cur+(1-rnt)*loss_replay
+        if x_ is None:
+            loss_total = loss_cur
+        else:
+            loss_total = loss_replay if (x is None) else rnt*loss_cur+(1-rnt)*loss_replay
 
 
         #--(3)-- ALLOCATION LOSSES --#
@@ -209,7 +231,7 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
             'loss_current':loss_cur.item() if x is not None else 0,
             'loss_replay': loss_replay.item() if (loss_replay is not None) and (x is not None) else 0,
             'pred_traj': pred_traj.item() if pred_traj is not None else 0,
-            'pred_traj_r': pred_traj_r.item() if pred_traj_r is not None else 0,
+            'pred_traj_r': sum(pred_traj_r).item()/n_replays if (x_ is not None and pred_traj_r[0] is not None) else 0,
         }
 
 

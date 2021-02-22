@@ -6,7 +6,7 @@ import copy
 from continual_learner import ContinualLearner
 import utils
 
-def train_cl(model, train_datasets, replay_model="none", scenario="class", class_per_task=None, iters=200, batch_size=32,
+def train_cl(model, train_datasets, replay_model="none", scenario="class", class_per_task=None, iters=2, batch_size=32,
              generator=None, gen_iters=0, gen_loss_cbs= list(), loss_cbs=list(), eval_cbs=list(), sample_cbs=list(),
              use_exemplars=True, add_exemplars=False, metric_cbs=list()):
     '''
@@ -58,7 +58,7 @@ def train_cl(model, train_datasets, replay_model="none", scenario="class", class
             iters_left -= 1
             if iters_left==0:
                 # data_loader = iter(utils.get_data_loader())
-                data_loader = iter(train_dataset)
+                data_loader = iter(training_dataset)
 
                 #NOTE: [train_dataset] is training-set of current task
                 #      [training_dataset] is training-set of current task with stored exemplars added (if requested)
@@ -70,8 +70,9 @@ def train_cl(model, train_datasets, replay_model="none", scenario="class", class
             ##------CURRENT BATCH-------##
             out = next(data_loader)                                     # --> sample training data of current task
             # y = y - class_per_task*(task-1) if scenario="task" else y    # --> ITL: adjust y-targets
-            print('\nout', len(out))
+            # print('\nout', len(out))
             x, y = out[0].to(device), out[1].to(device)                            # --> transfer them to correct device
+            loss_mask = out[5].to(device)
             binary_distillation = hasattr(model, "binaryCE") and model.binaryCE and model.binaryCE_distill
             if binary_distillation and scenario=="class" and (previous_model is not None):
                 with torch.no_grad():
@@ -87,6 +88,9 @@ def train_cl(model, train_datasets, replay_model="none", scenario="class", class
             if Generative or Current:
                 # Get replayed data (i.e., [x_]) -- either current data or use previous generator
                 x_ = x if Current else previous_generator.sample(batch_size)
+                y_ = previous_model(x_)
+
+                # todo ----> How to generate y_ with encoder.py
 
                 # Get target scores and labels (i.e., [scores_] / [y_]) -- using previous model, with no_grad()
                 # -if there are no task-specific mask, obtain all predicted scores at once
@@ -95,7 +99,7 @@ def train_cl(model, train_datasets, replay_model="none", scenario="class", class
             if batch_index <= iters:
 
                 # Train the main model with this batch
-                loss_dict = model.train_a_batch(x, y, x_=x_, y_=y_, rnt=1./task)
+                loss_dict = model.train_a_batch(x, y, x_=x_, y_=y_, loss_mask=loss_mask, rnt=1./task)
 
                 # Fire callbacks (for visualization of training-progress / evaluating performance after each task)
                 for loss_cb in loss_cbs:
