@@ -32,8 +32,18 @@ def _sample_cb(log, config, visdom=None, test_datasets=None, sample_size=64, ite
     # Return the callback-function (except if neither visdom or pdf is selected!)
     return sample_cb if (visdom is not None) else None
 
-def _eval_cb():
-    pass
+def _eval_cb(log, test_datasets, visdom=None, iters_per_task=None, test_size=None, classes_per_task=None,
+             scenario="class", summary_graph=True, with_exemplars=False):
+    def eval_cb(predictor, batch, task=1):
+        '''Callback-function, to evaluate performance of classifier.'''
+
+        iteration = batch if task==1 else (task-1)*iters_per_task + batch
+
+        # evaluate the solver on multiple tasks (and log to visdom)
+        if iteration % log == 0:
+            evaluate.precision(predictor, test_datasets, task, iteration, visdom=visdom, summary_graph=summary_graph)
+
+    return eval_cb if (visdom is not None) else None
 
 
 ##------------------------------------------------------------------------------------------------------------------##
@@ -43,8 +53,15 @@ def _eval_cb():
 ################################################
 
 
-def _metric_cb():
-    pass
+def _metric_cb(log, test_datasets, metrics_dict=None, iters_per_task=None, test_size=None):
+    def metric_cb(predictor, batch, task=1):
+        iteration = batch if task==1 else (task-1)*iters_per_task + batch
+        if iteration % log == 0:
+            evaluate.metric_statistics(predictor, test_datasets, task, iteration,
+                                       metrics_dict=metrics_dict)
+
+    return metric_cb if (metrics_dict is not None) else None
+
 
 
 ##------------------------------------------------------------------------------------------------------------------##

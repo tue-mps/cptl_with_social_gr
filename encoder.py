@@ -9,6 +9,16 @@ from continual_learner import ContinualLearner
 
 from utils import l2_loss
 
+def get_noise(shape, noise_type):
+    if noise_type == "gaussian":
+        return torch.randn(*shape).cuda()
+    elif noise_type == "uniform":
+        return torch.rand(*shape).sub_(0.5).mul_(2.0).cuda()
+    raise ValueError('Unrecognized noise type "%Ss"' % noise_type)
+
+
+
+
 
 class Predictor(ContinualLearner, Replayer, ExemplarHandler):
     '''Model for predicting trajectory, "enriched" as "ContinualLearner"-, Replayer- and ExemplarHandler-object.'''
@@ -22,6 +32,8 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
             traj_lstm_hidden_size,
             traj_lstm_output_size,
             dropout=0,
+            noise_dim=(8,),
+            noise_type="gaussian",
     ):
         super().__init__()
         self.label = "predictor"
@@ -31,14 +43,18 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
         self.traj_lstm_hidden_size = traj_lstm_hidden_size
         self.traj_lstm_output_size = traj_lstm_output_size
 
+        self.noise_dim = noise_dim
+        self.noise_type = noise_type
+
+
         #--------------------------MAIN SPECIFY MODEL------------------------#
 
         #-------Encoder-------#
         self.traj_lstm_model = nn.LSTMCell(traj_lstm_input_size, traj_lstm_hidden_size)
 
         #-------Decoder------#
-        self.pred_lstm_model = nn.LSTMCell(traj_lstm_input_size, traj_lstm_output_size)
-        self.pred_hidden2pos =nn.Linear(self.traj_lstm_output_size, 2)
+        self.pred_lstm_model = nn.LSTMCell(traj_lstm_input_size, traj_lstm_output_size+noise_dim[0])
+        self.pred_hidden2pos =nn.Linear(self.traj_lstm_output_size+noise_dim[0], 2)
 
     # initial encoder traj lstm hidden states
     def init_encoder_traj_lstm(self, batch):
@@ -52,6 +68,14 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
             torch.randn(batch, self.traj_lstm_output_size).cuda(),
             torch.randn(batch, self.traj_lstm_output_size).cuda(),
         )
+
+    # add noise before decoder
+    def add_noise(self, _input):
+        noise_shape = (_input.size(0),) + self.noise_dim
+        z_decoder = get_noise(noise_shape, self.noise_type)
+        decoder_h = torch.cat([_input, z_decoder], dim=1)
+        return decoder_h
+
 
 
     # def is_on_cuda(self):
@@ -82,16 +106,10 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
             traj_lstm_hidden_states += [traj_lstm_h_t]
 
 
-        # for i, input_t in enumerate(
-        #     obs_traj_pos
-        # ):
-        #     traj_lstm_h_t, traj_lstm_c_t = self.traj_lstm_model(
-        #         input_t.squeeze(0), (traj_lstm_h_t, traj_lstm_c_t)
-        #     )
-        #     traj_lstm_hidden_states += [traj_lstm_h_t]
 
         output = obs_traj_pos[self.obs_len-1]
-        pred_lstm_h_t = traj_lstm_hidden_states[-1]
+        pred_lstm_h_t_before_noise = traj_lstm_hidden_states[-1]
+        pred_lstm_h_t = self.add_noise(pred_lstm_h_t_before_noise)
         pred_lstm_c_t = torch.zeros_like(pred_lstm_h_t).cuda()
 
         for i in range(self.pred_len):
@@ -103,51 +121,9 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
         outputs = torch.stack(pred_traj_pos)
 
 
-        '''
-        if self.training:
-            for i, input_t in enumerate(
-                obs_traj_pos[-self.pred_len :].chunk(
-                    obs_traj_pos[-self.pred_len :].size(0), dim=0
-                )
-            ):
-                pred_lstm_h_t, pred_lstm_c_t = self.pred_lstm_model(
-                    input_t.squeeze(0), (pred_lstm_h_t, pred_lstm_c_t)
-                )
-                output = self.pred_hidden2pos(pred_lstm_h_t)
-                pred_traj_pos += [output]
-            outputs = torch.stack(pred_traj_pos)
-        else:
-            for i in range(self.pred_len):
-                pred_lstm_h_t, pred_lstm_c_t = self.pred_lstm_model(
-                    output, (pred_lstm_h_t, pred_lstm_c_t)
-                )
-                output = self.pred_hidden2pos(pred_lstm_h_t)
-                pred_traj_pos += [output]
-            outputs = torch.stack(pred_traj_pos)
-        '''
-
-
-        # if self.training:
-        #     for i, input_t in enumerate(
-        #         future_traj_pos
-        #     ):
-        #         pred_lstm_h_t, pred_lstm_c_t = self.pred_lstm_model(
-        #             input_t.squeeze(0), (pred_lstm_h_t, pred_lstm_c_t)
-        #         )
-        #         output = self.pred_hidden2pos(pred_lstm_h_t)
-        #         pred_traj_pos += [output]
-        #     outputs = torch.stack(pred_traj_pos)
-        # else:
-        #     for i in range(self.pred_len):
-        #         pred_lstm_h_t, pred_lstm_c_t = self.pred_lstm_model(
-        #             output, (pred_lstm_h_t, pred_lstm_c_t)
-        #         )
-        #         output = self.pred_hidden2pos(pred_lstm_h_t)
-        #         pred_traj_pos += [output]
-        #     outputs = torch.stack(pred_traj_pos)
         return outputs
 
-    def train_a_batch(self, x, y, x_=None, y_=None, loss_mask=None, active_classes=None, rnt=0.5):
+    def train_a_batch(self, x_rel, y_rel, x_rel_=None, y_rel_=None, loss_mask=None, active_classes=None, rnt=0.5):
         '''
         Train model for one batch ([x],[y]), possibly supplemented with replayed data ([x_], [y_]).
 
@@ -166,8 +142,8 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
 
         #--(1)-- REPLAYED DATA---#
 
-        if x_ is not None:
-            y_ = [y_]
+        if x_rel_ is not None:
+            y_ = [y_rel_]
             n_replays = len(y_) if (y_ is not None) else None
 
             # Prepare lists to store losses for each replay
@@ -176,7 +152,8 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
             distill_r = [None]*n_replays
 
             # Loop to evaluate predictions on replay according to each previous task
-            y_hat_all = self(x_)
+            y_hat_all = self(x_rel_)
+
 
             for replay_id in range(n_replays):
                 # -if needed (e.g., Task-IL or Class-IL scenario), remove predictions for classed not in replayed task
@@ -184,7 +161,7 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
                 y_hat = y_hat_all
 
                 # Calculate losses
-                if (y_ is not None) and (y_[replay_id] is not None):
+                if (y_rel_ is not None) and (y_[replay_id] is not None):
                     # pred_traj_r[replay_id] = F.cross_entropy(y_hat.permute(1,0,2), y_[replay_id].permute(1,0,2), reduction='mean')
                     pred_traj_r[replay_id] = l2_loss(y_hat, y_[replay_id], mode="average")
 
@@ -192,18 +169,19 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
                 loss_replay[replay_id] = pred_traj_r[replay_id]
 
         # Calculate total replay loss
-        loss_replay = None if (x_ is None) else sum(loss_replay) / n_replays
+        loss_replay = None if (x_rel_ is None) else sum(loss_replay) / n_replays
 
 
         #--(2)-- CURRENT DATA --#
 
-        if x is not None:
+        if x_rel is not None:
             # Run model
-            y_hat = self(x)
-
+            y_hat_rel = self(x_rel)
+            # relative to absolute
+            # y_hat = relative_to_abs(y_hat_rel, )
             # Calculate prediction loss
             # pred_traj = None if y is None else F.cross_entropy(input=y_hat.permute(1,0,2), target=y.permute(1,0,2), reduction='mean')
-            pred_traj = None if y is None else l2_loss(y_hat, y, mode="average")
+            pred_traj = None if y_rel is None else l2_loss(y_hat_rel, y_rel, mode="average")
             # a = torch.numel(loss_mask.data)
 
             # Weigh losses
@@ -211,10 +189,10 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
 
 
         # Combine loss from current and replayed batch
-        if x_ is None:
+        if x_rel_ is None:
             loss_total = loss_cur
         else:
-            loss_total = loss_replay if (x is None) else rnt*loss_cur+(1-rnt)*loss_replay
+            loss_total = loss_replay if (x_rel is None) else rnt*loss_cur+(1-rnt)*loss_replay
 
 
         #--(3)-- ALLOCATION LOSSES --#
@@ -228,10 +206,10 @@ class Predictor(ContinualLearner, Replayer, ExemplarHandler):
         # Returen the dictionary with different training-loss split in categories
         return {
             'loss_total': loss_total.item(),
-            'loss_current':loss_cur.item() if x is not None else 0,
-            'loss_replay': loss_replay.item() if (loss_replay is not None) and (x is not None) else 0,
+            'loss_current':loss_cur.item() if x_rel is not None else 0,
+            'loss_replay': loss_replay.item() if (loss_replay is not None) and (x_rel is not None) else 0,
             'pred_traj': pred_traj.item() if pred_traj is not None else 0,
-            'pred_traj_r': sum(pred_traj_r).item()/n_replays if (x_ is not None and pred_traj_r[0] is not None) else 0,
+            'pred_traj_r': sum(pred_traj_r).item()/n_replays if (x_rel_ is not None and pred_traj_r[0] is not None) else 0,
         }
 
 

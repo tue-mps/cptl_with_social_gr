@@ -1,2 +1,12 @@
-# CL_for_trajectory_prediction
-This is a repository about trajectory prediciton with continual learning
+# Continual-Learning-for-trajectory-prediction
+This is a repository about the continual learning for trajectory prediction
+
+
+
+
+
+
+
+## Attention
+
+no noise and only one sample

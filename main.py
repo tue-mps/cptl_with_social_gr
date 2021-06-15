@@ -6,6 +6,7 @@ import time
 import torch
 import utils
 import evaluate
+import visual_plt
 import callbacks as cb
 from torch import optim
 import pandas as pd
@@ -15,7 +16,7 @@ from vae_models import AutoEncoder
 from encoder import Predictor
 from replayer import Replayer
 from train import train_cl
-from data import data_loader
+from data import data_set,data_loader
 from param_stamp import get_param_stamp
 
 parser = argparse.ArgumentParser('./main.py', description='Run experiment.')
@@ -57,15 +58,16 @@ model_params.add_argument('--traj_lstm_output_size', default=32, type=int)
 
 # training hyperparameters / initialization
 train_params = parser.add_argument_group('Training Parameters')
-train_params.add_argument('--iters', type=int, default=500, help="batches to optimize solver")
+train_params.add_argument('--iters', type=int, default=5, help="batches to optimize solver")
 train_params.add_argument('--lr', type=float, help="learning rate")
 train_params.add_argument('--batch_size', type=int, default=64, help="batch-size") #
+train_params.add_argument('--replay_batch_size', default=32, type=int, help="replay batch size")
 train_params.add_argument('--optimizer', type=str, choices=['adam', 'adam_reset', 'sgd'], default='adam')
 
 # "memory replay" parameters
 replay_params = parser.add_argument_group('Replay Parameters')
 replay_params.add_argument('--feedback', action='store_true', help="equip model with feedback connections")
-replay_params.add_argument('--z-dim', type=int, default=100, help="size of latent representation")
+replay_params.add_argument('--z_dim', type=int, default=100, help="size of latent representation")
 replay_choices = ['offline', 'exact', 'generative', 'none', 'current', 'exemplars']
 replay_params.add_argument('--replay', type=str, default='generative', choices=replay_choices)
 replay_params.add_argument('--distill', action='store_true', help='use distillation for replay')
@@ -99,6 +101,7 @@ eval_params.add_argument('--prec-log', type=int, default=200, metavar="N", help=
 eval_params.add_argument('--prec-n', type=int, default=1024, help="samples for evaluating solver's precision")
 eval_params.add_argument('--sample-log', type=int, default=500, metavar="N", help="iters after which to plot samples")
 eval_params.add_argument('--sample-n', type=int, default=64, help="images to show")  #todo
+eval_params.add_argument('--num_samples', type=int, default=20, help="sample trajectories when evaluation model")
 
 
 
@@ -145,11 +148,16 @@ def run(args, verbose=False):
     #
     # train_datasets = None
     # test_datasets = None
+    # train_order = ['students003','students001','crowds_zara02','crowds_zara01','biwi_hotel','biwi_eth']
     train_order = ['uni_examples','students003','students001','crowds_zara03','biwi_hotel','crowds_zara02','crowds_zara01']
+    val_order = ['biwi_eth','biwi_eth','biwi_eth','biwi_eth','biwi_eth','biwi_eth','biwi_eth']
+    val_name = "biwi_eth"
+    # train_order = ['biwi_hotel','uni_examples','students003','students001','crowds_zara03','crowds_zara02','crowds_zara01','biwi_eth']
+    # train_order = ['uni_examples','students003','students001','crowds_zara03','crowds_zara02','crowds_zara01','biwi_eth']
     tasks = len(train_order)
-    test_dataset = "biwi_eth"
+    # test_dataset = "biwi_eth"
     train_datasets = []
-    # val_datasets = []
+    val_datasets = []
     print("\nInitializing train dataset")
     print("\nInitializing val dataset")
 
@@ -159,14 +167,26 @@ def run(args, verbose=False):
         # val_path = utils.get_dset_path("val")
         # load train dataset
         data_type = ".txt"
-        train_dset, train_loader = data_loader(args, train_path, dataset_name, data_type)
+        train_dset = data_set(args, train_path, dataset_name, data_type)
         # load val dataset
         # data_type = "_val.txt"
         # _, val_loader = data_loader(args, val_path, dataset_name, data_type)
-        train_datasets.append(train_loader)
+        train_datasets.append(train_dset)
         # val_datasets.append(val_loader)
-    # return (train_datasets, val_datasets)
 
+    for i, dataset_name in enumerate(val_order):
+        # load train/val dataset path
+        # train_path = utils.get_dset_path("train")
+        val_path = utils.get_dset_path("val")
+        # load train dataset
+        # data_type = "_train.txt"
+        # train_dset, train_loader = data_loader(args, train_path, dataset_name, data_type)
+        # load val dataset
+        data_type = ".txt"
+        val_dset = data_set(args, val_path, dataset_name, data_type)
+        val_loader = data_loader(args, val_dset, args.batch_size)
+        # train_datasets.append(train_loader)
+        val_datasets.append(val_loader)
 
 
 
@@ -252,14 +272,15 @@ def run(args, verbose=False):
 
     # Prepare for keeping track of statistics required for metrics (also used for plotting in pdf)
     if args.pdf or args.metrics:
-        pass
+        metric_dict = evaluate.initiate_metrics_dict(n_tasks=tasks)
+        metric_dict = evaluate.intial_accuracy(model, val_datasets, metric_dict)
     else:
-        pass
+        metric_dict = None
 
     # -Prepare for plotting in visdom
     # -visdom-settings
     if args.visdom:
-        env_name = "{exp}{tasks}-{scenario}".format(exp='Pedestrian', tasks=tasks, scenario=test_dataset)
+        env_name = "{exp}-{tasks}-{iters}-{z_dim}-{batch_size}-{replay_batch_size}-{lr}-{val_name}".format(exp='Pedestrian', tasks=tasks, iters=args.iters, z_dim=args.z_dim, batch_size=args.batch_size, replay_batch_size=args.replay_batch_size, lr=args.lr, val_name=val_name)
         graph_name = "{fb}{replay}".format(
             fb="1M-" if args.feedback else "",
             replay="{}{}{}".format(args.replay, "D" if args.distill else "", "-aGEM" if args.agem else ""),
@@ -290,10 +311,17 @@ def run(args, verbose=False):
     sample_cbs = [] if (train_gen or args.feedback) else [None]
 
     # Callbacks for reporting and visualizing accuracy
-    eval_cbs = [] if (not args.use_exemplars) else [None]
+    eval_cbs = [
+        cb._eval_cb(log=args.prec_log, test_datasets=val_datasets, visdom=visdom,
+                    iters_per_task=args.iters)
+    ] if (not args.use_exemplars) else [None]
 
     # Callbacks for calculating statists required for metrics
-    metric_cbs = []
+    metric_cbs = [
+        cb._metric_cb(log=args.iters, test_datasets=val_datasets,
+                      iters_per_task=args.iters, metrics_dict=metric_dict)
+    ]
+
 
 
     #-----------------------------------------------------------------------------------------------------------------#
@@ -307,7 +335,7 @@ def run(args, verbose=False):
     # Keep track of training-time
     start = time.time()
     # Train model
-    train_cl(model, train_datasets, replay_model=args.replay, iters=args.iters, batch_size=args.batch_size,
+    train_cl(args, model, train_datasets, replay_model=args.replay, iters=args.iters, batch_size=args.batch_size,
              generator=generator, gen_iters=args.g_iters, gen_loss_cbs=generator_loss_cbs,
              sample_cbs=sample_cbs, eval_cbs=eval_cbs, loss_cbs=generator_loss_cbs if args.feedback else solver_loss_cbs,
              metric_cbs=metric_cbs)
@@ -330,7 +358,22 @@ def run(args, verbose=False):
         print("\n\nEVALUATION RESULTS:")
 
     # Evaluate precision of final model on full test-set
-    ade, fde = evaluate.validate(args, model, test_dataset)
+    ades = []
+    fdes = []
+    for i in range(tasks):
+        ade, fde = evaluate.validate(model, val_datasets[i])
+        ades.append(ade)
+        fdes.append(fde)
+    average_ades = sum(ades) / tasks
+    average_fdes = sum(fdes) / tasks
+    # -print on screen
+    if verbose:
+        print("\n Precision on test-set")
+        for i in range(tasks):
+            print(" - Task {}: ADE {:.4f} FDE {:.4f}".format(i+1, ades[i], fdes[i]))
+        print("==> Average precision over all {} tasks: ADE {:.4f} FDE {:.4f}".format(tasks, average_ades, average_fdes))
+
+
 
 
 
@@ -353,8 +396,8 @@ def run(args, verbose=False):
     #-------------------# #
 
     # Average precision on full test set
-    output_file = open("{}/prec-{}.txt".format(args.r_dir, "test"), "w")
-    output_file.write('ADE:{ade}\nFDE:{fde}'.format(ade=ade, fde=fde))
+    output_file = open("{}/prec-{replay}-{iters}-{z_dim}-{batch_size}-{replay_batch_size}-{lr}-{val_name}.txt".format(args.r_dir, replay=args.replay, iters=args.iters, z_dim=args.z_dim, batch_size=args.batch_size, replay_batch_size=args.replay_batch_size, lr=args.lr, val_name=val_name), "w")
+    output_file.write('Training:{order}\nADEs:{ades}\nADE:{ade}\nFDEs:{fdes}\nFDE:{fde}'.format(order=train_order,ades=ades, ade=average_ades, fdes=fdes, fde=average_fdes))
     output_file.close()
 
     # -metrics-dict
@@ -368,7 +411,74 @@ def run(args, verbose=False):
 
     # If requested, generate pdf
     if args.pdf:
-        pass
+        # -open pdf
+        plot_name = "{}/{}-{}.pdf".format(args.p_dir, param_stamp, val_name)
+        pp = visual_plt.open_pdf(plot_name)
+
+        # -show metrics reflecting progression during training
+        figure_list = []  # -> create list to store all figures to be plotted
+
+        # -generate all figures (and store them in [figure_list])
+        key_ade = "ade per task"
+        plot_ade_list = []
+        for i in range(tasks):
+            plot_ade_list.append(metric_dict[key_ade]["task {}".format(i+1)])
+        figure = visual_plt.plot_lines(
+            plot_ade_list, x_axes=metric_dict["x_task"],
+            line_names=["task {}".format(i+1) for i in range(tasks)],
+            title="ADE for each tasks"
+        )
+        figure_list.append(figure)
+
+        key_fde = "fde per task"
+        plot_fde_list = []
+        for i in range(tasks):
+            plot_fde_list.append(metric_dict[key_fde]["task {}".format(i+1)])
+        figure = visual_plt.plot_lines(
+            plot_fde_list, x_axes=metric_dict["x_task"],
+            line_names=["task {}".format(i+1) for i in range(tasks)],
+            title="FDE for each tasks"
+        )
+        figure_list.append(figure)
+
+        # calculate average ade/fde
+        figure = visual_plt.plot_lines(
+            [metric_dict["average_ade"]], x_axes=metric_dict["x_task"],
+            line_names=["average ade all tasks so far"],
+            title="Average ADE"
+        )
+        figure_list.append(figure)
+
+        figure = visual_plt.plot_lines(
+            [metric_dict["average_fde"]], x_axes=metric_dict["x_task"],
+            line_names=["average fde all tasks so far"],
+            title="Average FDE"
+        )
+        figure_list.append(figure)
+
+        # -add figures to pdf (and close this pdf)
+        for figure in figure_list:
+            pp.savefig(figure)
+
+        # output
+        output_file = open(
+            "{}/ADE-FDE-{replay}-{iters}-{z_dim}-{batch_size}-{replay_batch_size}-{lr}-{val_name}.txt".format(args.r_dir, replay=args.replay,
+                                                                                       iters=args.iters,
+                                                                                       z_dim=args.z_dim,
+                                                                                       batch_size=args.batch_size,
+                                                                                       replay_batch_size=args.replay_batch_size,
+                                                                                       lr=args.lr, val_name=val_name),
+            "w")
+        output_file.write('ADEs:{ades}\nAverage_ADE:{ade}\nFDEs:{fdes}\nAverage_FDE:{fde}'.format(ades=plot_ade_list,ade=metric_dict["average_ade"],fdes=plot_fde_list,fde=metric_dict["average_fde"]))
+        output_file.close()
+
+
+        # -close pdf
+        pp.close()
+
+        # -print name of generated plot on screen
+        if verbose:
+            print("\nGenerated plot: {}\n".format(plot_name))
 
 
 
