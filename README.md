@@ -12,7 +12,11 @@ You can run `conda install --yes --file requirements.txt` to install all depende
 
 # Running the experiments
 
-Individual experiments can be run with `main.py`. Main options are:
+Individual experiments can be run with `main.py`. 
+
+You can run `python main.py --replay=generative --iters=1000 --z_dim=128 --batch_size=32 --replay_batch_size=128 --pdf --visdom`, this code will work.
+
+Main options are:
 
 - `--replay`: whether use generative replay model? (`none | generative`)
 - `--iters`: the number of epochs. (default is `1000`)
